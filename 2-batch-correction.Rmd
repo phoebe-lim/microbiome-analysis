@@ -1,0 +1,171 @@
+---
+title: "Batch Correction"
+---
+
+# Load required packages
+
+```{r}
+library(tidyverse)
+library(glue)
+library(ggtext)
+library(vegan)
+library(MMUPHin)
+```
+
+# Load files
+
+```{r}
+setwd("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Microbiome Analysis")
+meta_muc5b <- read_csv("Metadata Processing/metadata_final.csv") %>%
+  drop_na(ddPCR, MUC5B) %>% filter(diagnosis == "IPF")
+abund_matrix <- read_csv("Preprocessed Files/Genus/Genus_rel_abund_metadata.csv") %>% 
+  drop_na(MUC5B) %>% filter(diagnosis == "IPF") %>% 
+  select(-c(key, diagnosis, MUC5B)) %>% column_to_rownames(var = "sample_id")
+```
+
+# Global plot settings
+
+```{r}
+theme_set(theme_bw() + theme(legend.title = element_text(face = "bold"),
+                             plot.subtitle = element_markdown(size = 10),
+                             plot.tag = element_text(face = "bold")))
+```
+
+# Check for batch effect using PCoA
+
+```{r}
+set.seed(2526) # ensures reproducible results from adonis2
+permanova <- adonis2(abund_matrix ~ study, data = meta_muc5b)
+permanova
+```
+
+```{r}
+pval <- permanova$`Pr(>F)`[1]
+r2 <- permanova$R2[1]
+```
+
+```{r}
+dist <- vegdist(abund_matrix)
+pcoa <- cmdscale(dist, eig = TRUE)
+
+pcoa_eig <- pcoa$eig
+total_variance <- sum(pcoa_eig[pcoa_eig > 0])
+percent_expl_pco1 <- (pcoa_eig[1] / total_variance) * 100
+percent_expl_pco2 <- (pcoa_eig[2] / total_variance) * 100
+
+pcoa_coord <- pcoa$points
+colnames(pcoa_coord) <- c("PCo1", "PCo2")
+dissimilarity <- cbind(meta_muc5b, pcoa_coord)
+
+pcoa_bef <- ggplot(data = dissimilarity, aes(x = PCo1, y = PCo2, colour = study, shape = study)) + 
+  geom_point(size = 1) + stat_ellipse(linetype = 2) +
+  guides(shape = guide_legend(title = "Cohort", override.aes = list(colour = c("#0E7175", "#FD7901", "#C35BCA"))),
+         colour = "none") +
+  labs(subtitle = glue("PERMANOVA *p* = {signif(pval, 3)}<br>
+                       *R*<sup>2</sup> = {signif(r2, 3)}"),
+       x = glue("PCo1 ({signif(percent_expl_pco1, 3)}%)"),
+       y = glue("PCo2 ({signif(percent_expl_pco2, 3)}%)"),
+       tag = "A") +
+  scale_colour_manual(values = c("#0E7175", "#FD7901", "#C35BCA")) +
+  scale_shape_manual(values = c(1, 2, 0))
+```
+
+# Format input files for MMUPHin
+
+Abundances should be a taxa by samples matrix
+
+```{r}
+abund_matrix <- t(as.matrix(abund_matrix))
+```
+
+Column names of abundance matrix should be the same as row names of metadata data frame
+
+```{r}
+meta_muc5b <- column_to_rownames(meta_muc5b, var = "sample_id")
+colnames(abund_matrix) == rownames(meta_muc5b)
+```
+
+# Batch correction using MMUPHin
+
+```{r}
+fit_adjust_batch <- adjust_batch(feature_abd = abund_matrix,
+                                 batch = "study",
+                                 covariates = "MUC5B",
+                                 data = meta_muc5b,
+                                 control = list(verbose = FALSE))
+abund_matrix_adj <- fit_adjust_batch$feature_abd_adj
+```
+
+# Check effect of batch correction
+
+```{r}
+abund_matrix_adj <- t(abund_matrix_adj)
+permanova_adj <- adonis2(abund_matrix_adj ~ study, data = meta_muc5b)
+permanova_adj
+```
+
+Smaller R^2 and F values.
+
+```{r}
+pval_adj <- permanova_adj$`Pr(>F)`[1]
+r2_adj <- permanova_adj$R2[1]
+
+dist_adj <- vegdist(abund_matrix_adj)
+pcoa_adj <- cmdscale(dist_adj, eig = TRUE)
+
+pcoa_eig_adj <- pcoa_adj$eig
+total_variance_adj <- sum(pcoa_eig_adj[pcoa_eig_adj > 0])
+percent_expl_pco1_adj <- (pcoa_eig_adj[1] / total_variance_adj) * 100
+percent_expl_pco2_adj <- (pcoa_eig_adj[2] / total_variance_adj) * 100
+
+pcoa_coord_adj <- pcoa_adj$points
+colnames(pcoa_coord_adj) <- c("PCo1", "PCo2")
+dissimilarity_adj <- cbind(meta_muc5b, pcoa_coord_adj)
+
+pcoa_aft <- ggplot(data = dissimilarity_adj, aes(x = PCo1, y = PCo2, colour = study, shape = study)) + 
+  geom_point(size = 1) + stat_ellipse(linetype = 2) +
+  guides(shape = guide_legend(title = "Cohort", override.aes = list(colour = c("#0E7175", "#FD7901", "#C35BCA"))),
+         colour = "none") +
+  labs(subtitle = glue("PERMANOVA *p* = {signif(pval_adj, 3)}<br>
+                       *R*<sup>2</sup> = {signif(r2_adj, 3)}"),
+       x = glue("PCo1 ({signif(percent_expl_pco1_adj, 3)}%)"),
+       y = glue("PCo2 ({signif(percent_expl_pco2_adj, 3)}%)"),
+       tag = "B") +
+  scale_colour_manual(values = c("#0E7175", "#FD7901", "#C35BCA")) +
+  scale_shape_manual(values = c(1, 2, 0))
+
+fig <- pcoa_bef + pcoa_aft + plot_layout(guides = "collect")
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/batch_adjust.svg", width = 12, height = 5)
+print(fig)
+dev.off()
+```
+
+# Export batch corrected abundance matrix for downstream analyses
+
+```{r}
+abund_matrix_adj <- as.data.frame(abund_matrix_adj) %>% rownames_to_column("sample_id")
+write_csv(abund_matrix_adj, "Preprocessed Files/Genus/Genus_rel_abund_corrected.csv")
+```
+
+# Batch correction on abundance matrix aggregated by Family
+
+```{r}
+# Load abundance matrix
+abund_family <- read_csv("Preprocessed Files/Family/Family_rel_abund_metadata.csv") %>% 
+  drop_na(MUC5B) %>% filter(diagnosis == "IPF") %>% 
+  select(-c(key, diagnosis, MUC5B)) %>% column_to_rownames(var = "sample_id") %>% 
+  as.matrix() %>% t() # taxa by samples
+
+# Batch correction
+colnames(abund_family) == rownames(meta_muc5b)
+fit_adjust_batch <- adjust_batch(feature_abd = abund_family,
+                                 batch = "study",
+                                 covariates = "MUC5B",
+                                 data = meta_muc5b,
+                                 control = list(verbose = FALSE))
+abund_family_adj <- fit_adjust_batch$feature_abd_adj %>% t() %>% 
+  as.data.frame() %>% rownames_to_column("sample_id")
+
+# Export corrected matrix
+write_csv(abund_family_adj, "Preprocessed Files/Family/Family_rel_abund_corrected.csv")
+```

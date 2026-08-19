@@ -1,0 +1,509 @@
+---
+title: "QC and Preprocessing of 16S rRNA Sequencing Data"
+---
+
+# Load required packages
+
+```{r}
+library(phyloseq)
+library(tidyverse)
+library(glue)
+library(vegan)
+library(qiime2R)
+library(decontam)
+library(microbiome)
+library(ggrepel)
+library(patchwork)
+library(rstatix)
+library(ggtext)
+```
+
+# Load files
+
+```{r}
+setwd("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Microbiome Analysis")
+metadata <- read_csv("Metadata Processing/metadata_final.csv")
+```
+
+Remove samples with missing ddPCR values
+
+```{r}
+metadata <- drop_na(metadata, ddPCR)
+```
+
+Load QIIME2 artefacts into phyloseq object
+
+```{r}
+physeq <- qza_to_phyloseq(features = "QIIME2 Output/filtered-metadata-table.qza", # otu_table
+                          tree = "QIIME2 Output/merged-midrooted-tree.qza",
+                          taxonomy = "QIIME2 Output/taxonomy-merged-final.qza")
+physeq
+```
+
+# QC
+
+## Verify concordance between qza files and metadata
+
+```{r}
+gplots::venn(list(metadata = metadata$sample_id, physeq = sample_names(physeq)))
+```
+
+42 samples are missing ddPCR values and were removed from metadata.
+
+Identify these samples
+
+```{r}
+setdiff(sample_names(physeq), metadata$sample_id)
+```
+
+Assign metadata as the sample_data slot of physeq
+
+```{r}
+metadata <- column_to_rownames(metadata, var = "sample_id")
+sample_data(physeq) <- metadata
+summarize_phyloseq(physeq)
+```
+
+```{r}
+sample_data_df <- meta(physeq) # extract sample_data as a dataframe
+table(sample_data_df$diagnosis)
+```
+
+## Plot library size per sample
+
+```{r}
+sample_data_df <- sample_data_df %>% 
+  mutate(library_size = sample_sums(physeq)) %>% # total no. of reads for each sample (sums across all taxa in otu_table)
+  arrange(library_size) %>% # sort by library size
+  mutate(index = seq(nrow(sample_data_df)))
+sample_data_df %>%
+  ggplot(aes(x = index, y = library_size, color = sample_type)) +
+  geom_point(size = 0.5)
+```
+
+```{r}
+sample_data_df %>%
+  ggplot(aes(x = ddPCR, y = library_size, color = sample_type)) +
+  geom_point(size = 0.5)
+```
+
+## Identify contaminants using two methods
+
+Frequency: Contaminants should vary inversely with no. of 16S gene copies (ddPCR values)
+
+Prevalence: Contaminants should be more prevalent in negative controls
+
+Identify negative controls for prevalence-based contaminant identification
+
+```{r}
+physeq_nr <- subset_samples(physeq, sample_type != "Water Oral Control") # remove oral rinse controls
+sample_data(physeq_nr)$is_ctrl <- sample_data(physeq_nr)$sample_type != "BAL"
+```
+
+### Combined method: Accounts for both frequency and prevalence
+
+We usually use this method for robustness
+
+```{r}
+comb_contam <- isContaminant(physeq_nr, method = "combined", conc = "ddPCR", neg = "is_ctrl") # returns a data frame
+```
+
+```{r}
+table(comb_contam$contaminant)
+```
+
+```{r}
+head(which(comb_contam$contaminant)) # where in comb_contam to look
+```
+
+Plot frequency against DNA concentration of 20 random contaminants. Frequency of contaminants should vary inversely with concentration.
+
+```{r}
+comb_contam_sample <- taxa_names(physeq_nr)[sample(which(comb_contam$contaminant), 20)]
+plot_frequency(physeq_nr, comb_contam_sample, conc = "ddPCR") + xlab("DNA Concentration (gene/mL)")
+```
+
+Plot presence/absence of contaminants in samples vs controls. Contaminants should be of low prevalence in true samples.
+
+```{r}
+physeq_pa <- transform_sample_counts(physeq_nr, function(abund) 1 * (abund > 0)) # transform abundance counts in otu_table to presence/absence binary
+physeq_pa_spl <- subset_samples(physeq_pa, !is.na(diagnosis))
+physeq_pa_ctrl <- subset_samples(physeq_pa, is.na(diagnosis))
+df_pa <- data.frame(samples = taxa_sums(physeq_pa_spl), # prevalence of each taxa in true samples and negative controls
+                    controls = taxa_sums(physeq_pa_ctrl),
+                    is_contam = comb_contam$contaminant)
+df_pa %>% 
+  ggplot(aes(x = controls, y = samples, color = is_contam)) +
+  geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)") 
+```
+
+The 9 identified contaminants clustered together with true taxa may not be true contaminants.
+
+Plot contaminant abundance across samples
+
+```{r}
+physeq_contam <- prune_taxa(comb_contam$contaminant, physeq_nr) # only subset contaminants from physeq
+sample_order <- names(sort(sample_sums(physeq_contam))) # order by total abundance
+plot_bar(physeq_contam, fill = "is_ctrl") + 
+  scale_x_discrete(limits = sample_order)
+```
+
+Contaminants are generally more abundant in controls. 6 samples may be contaminated.
+
+Identify highly abundant contaminants (1000 or more reads in at least 1 sample)
+
+```{r}
+is_abund_contam <- genefilter_sample(physeq_contam, filterfun_sample(function(reads) reads >= 1000))
+physeq_abund_contam <- prune_taxa(is_abund_contam, physeq_contam)
+```
+
+```{r}
+tax_table_abund_contam <- as.data.frame(tax_table(physeq_abund_contam))
+```
+
+### Prevalence method: Only accounts for prevalence
+
+```{r}
+prev_contam <- isContaminant(physeq_nr, method = "prevalence", neg = "is_ctrl")
+table(prev_contam$contaminant)
+```
+
+```{r}
+head(which(prev_contam$contaminant))
+```
+
+### Export contaminants obtained from both methods for manual inspection
+
+```{r}
+tax_table_mat <- as.matrix(tax_table(physeq_nr))
+```
+
+```{r}
+write.table(tax_table_mat[which(comb_contam$contaminant), ], file = "QC/comb_contaminants.txt", col.names = NA, sep = "\t") # col.names = NA adds blank column name for column of row (taxa) names
+write.table(tax_table_mat[which(prev_contam$contaminant), ], file = "QC/prev_contaminants.txt", col.names = NA, sep = "\t")
+```
+
+## How many taxa are not present in any sample?
+
+```{r}
+sum(taxa_sums(physeq_nr) == 0)
+```
+
+## Examine inter- and intra-group differences using PCoA plot
+
+### Using weighted UniFrac distance on full dataset
+
+```{r}
+ord <- ordinate(physeq, method = "PCoA", distance = "wunifrac")
+pcoa <- plot_ordination(physeq, ord, color = "sample_type", shape = "study", title = "PCoA using weighted UniFrac distance") +
+  geom_point(size = 0.5) +
+  scale_colour_manual(values = c("#FAAB18", "#1380A1", "#990000", "#588300", "#778899")) +
+  theme(plot.title = element_text(hjust = 0.5))
+pcoa
+```
+
+Draw confidence ellipses
+
+```{r}
+pcoa + stat_ellipse(aes(group = sample_type, color = sample_type)) +
+  geom_text_repel(data = filter(pcoa$data, sample_type == "BAL"),
+                  aes(label = rownames(filter(pcoa$data, sample_type == "BAL"))),
+                  max.overlaps = 25, color = "black", size = 3) +
+  theme_classic() + theme(plot.title = element_text(hjust = 0.5))
+```
+
+There are intra-group differences within the BAL samples.
+
+### Remove oral rinse controls
+
+```{r}
+ord_nr <- ordinate(physeq_nr, method = "PCoA", distance = "wunifrac")
+pcoa_nr <- plot_ordination(physeq_nr, ord_nr, color = "sample_type", shape = "study", title = "PCoA excluding oral rinse controls") +
+  geom_point(size = 0.5) +
+  scale_colour_manual(values = c("#FAAB18", "#1380A1", "#990000", "#588300")) +
+  theme(plot.title = element_text(hjust = 0.5))
+pcoa_nr + stat_ellipse(aes(group = sample_type, color = sample_type)) +
+  geom_text_repel(data = filter(pcoa_nr$data, sample_type == "BAL"),
+                  aes(label = rownames(filter(pcoa_nr$data, sample_type == "BAL"))),
+                  max.overlaps = 25, color = "black", size = 3) +
+  theme_classic() + theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Using Bray-Curtis distance
+
+```{r}
+ord_bray <- ordinate(physeq, method = "PCoA", distance = "bray")
+pcoa_bray <- plot_ordination(physeq, ord_bray, color = "sample_type", shape = "study", title = "PCoA using Bray-Curtis distance") +
+  geom_point(size = 0.5) +
+  scale_colour_manual(values = c("#FAAB18", "#1380A1", "#990000", "#588300", "#778899")) +
+  theme(plot.title = element_text(hjust = 0.5))
+pcoa_bray
+```
+
+PCoA components explain a smaller % of variance.
+
+### Remove contaminant taxa
+
+```{r}
+physeq_nc <- prune_taxa(!comb_contam$contaminant, physeq_nr)
+
+ord_nc <- ordinate(physeq_nc, method = "PCoA", distance = "wunifrac")
+pcoa_nc <- plot_ordination(physeq_nc, ord_nc, color = "sample_type", shape = "study", title = "PCoA excluding contaminant taxa") +
+  geom_point(size = 0.5) +
+  scale_colour_manual(values = c("#FAAB18", "#1380A1", "#990000", "#588300", "#778899"))
+pcoa_nc + stat_ellipse(aes(group = sample_type, color = sample_type)) +
+  geom_text_repel(data = filter(pcoa_nc$data, sample_type == "BAL"),
+                  aes(label = rownames(filter(pcoa_nc$data, sample_type == "BAL"))),
+                  max.overlaps = 25, color = "black", size = 3) +
+  theme_classic() + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Fewer true samples overlap with controls. We will remove contaminant taxa from subsequent analyses.
+
+### Dissertation figure
+
+```{r}
+theme_set(theme_bw() + theme(text = element_text(family = "Arial"),
+                             legend.title = element_text(face = "bold"),
+                             plot.tag = element_text(face = "bold")))
+
+physeq_nr <- subset_samples(physeq_nr, diagnosis == "IPF" | is_ctrl) # only keep IPF and control samples
+sample_data(physeq_nr)$study <- factor(sample_data(physeq_nr)$study,
+                                       levels = c("BRU", "PROFILE", "PROFOUND", "Control"),
+                                       labels = c("IPF (BRU)", "IPF (PROFILE)", "IPF (PROFOUND)", "Control"))
+```
+
+Before contaminant removal
+
+```{r}
+ord_nr <- ordinate(physeq_nr, method = "PCoA", distance = "wunifrac")
+eig <- ord_nr$values$Eigenvalues
+total_variance <- sum(eig[eig > 0])
+percent_expl_pco1 <- (eig[1] / total_variance) * 100
+percent_expl_pco2 <- (eig[2] / total_variance) * 100
+
+dist_matrix <- distance(physeq_nr, method = "wunifrac")
+permanova <- adonis2(dist_matrix ~ is_ctrl, data = meta(physeq_nr))
+pval <- permanova$`Pr(>F)`[1]
+r2 <- permanova$R2[1]
+
+pcoa_bef <- plot_ordination(physeq_nr, ord_nr, color = "is_ctrl", shape = "study") +
+  stat_ellipse(aes(group = is_ctrl, color = is_ctrl), linetype = 2) +
+  guides(shape = guide_legend(title = "Sample Type", override.aes = list(colour = c(rep("#D1495B", 3), "#00798C"))),
+         colour = "none") + 
+  labs(subtitle = glue("PERMANOVA *p* = {signif(pval, 3)}<br>
+                       *R*<sup>2</sup> = {signif(r2, 3)}"),
+       x = glue("PCo1 ({signif(percent_expl_pco1, 3)}%)"),
+       y = glue("PCo2 ({format(signif(percent_expl_pco2, 3), nsmall = 1)}%)"),
+       tag = "A") +
+  scale_colour_manual(values = c("#D1495B", "#00798C")) +
+  scale_shape_manual(values = c(1, 2, 0, 4)) +
+  theme(plot.subtitle = element_markdown(size = 10))
+```
+
+After contaminant removal
+
+```{r}
+physeq_nc <- prune_taxa(!comb_contam$contaminant, physeq_nr)
+ord_nc <- ordinate(physeq_nc, method = "PCoA", distance = "wunifrac")
+eig_nc <- ord_nc$values$Eigenvalues
+total_variance_nc <- sum(eig_nc[eig_nc > 0])
+percent_expl_pco1_nc <- (eig_nc[1] / total_variance_nc) * 100
+percent_expl_pco2_nc <- (eig_nc[2] / total_variance_nc) * 100
+
+dist_matrix_nc <- distance(physeq_nc, method = "wunifrac")
+permanova_nc <- adonis2(dist_matrix_nc ~ is_ctrl, data = meta(physeq_nc))
+pval_nc <- permanova_nc$`Pr(>F)`[1]
+r2_nc <- permanova_nc$R2[1]
+
+pcoa_aft <- plot_ordination(physeq_nc, ord_nc, color = "is_ctrl", shape = "study") +
+  stat_ellipse(aes(group = is_ctrl, color = is_ctrl), linetype = 2) +
+  guides(shape = guide_legend(title = "Sample Type", override.aes = list(colour = c(rep("#D1495B", 3), "#00798C"))),
+         colour = "none") + 
+  labs(subtitle = glue("PERMANOVA *p* = {signif(pval_nc, 3)}<br>
+                       *R*<sup>2</sup> = {signif(r2_nc, 3)}"),
+       x = glue("PCo1 ({signif(percent_expl_pco1_nc, 3)}%)"),
+       y = glue("PCo2 ({signif(percent_expl_pco2_nc, 3)}%)"),
+       tag = "B") +
+  scale_colour_manual(values = c("#D1495B", "#00798C")) +
+  scale_shape_manual(values = c(1, 2, 0, 4)) +
+  theme(plot.subtitle = element_markdown(size = 10))
+```
+
+```{r}
+fig <- pcoa_bef + pcoa_aft + plot_layout(guides = "collect")
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/contam_removal.svg", width = 12, height = 5)
+print(fig)
+dev.off()
+```
+
+## Alpha diversity
+
+```{r}
+physeq_alpha <- subset_samples(physeq_nc, diagnosis == "IPF" & !is.na(MUC5B))
+alpha_div <- plot_richness(physeq_alpha, x = "MUC5B", color = "MUC5B", measures = c("Observed", "Shannon", "InvSimpson", "Chao1"))
+alpha_div
+```
+
+### Chao1 index
+
+Chao1 uses singletons and doubletons to estimate true genus richness. As such we apply it on the unfiltered phyloseq object.
+
+```{r}
+alpha_div_chao <- alpha_div$data %>% filter(variable == "Chao1")
+chao_pval <- kruskal_test(value ~ MUC5B, data = alpha_div_chao)$p
+chao_fig <- ggplot(alpha_div_chao, aes(x = MUC5B, y = value)) +
+  geom_boxplot(aes(fill = MUC5B), outliers = FALSE, alpha = 0.4) +
+  geom_jitter(aes(colour = MUC5B, shape = MUC5B), size = 1.2) +
+  labs(subtitle = glue("Kruskal Wallis *p* = {signif(chao_pval, 3)}"),
+       x = "",
+       y = "Chao1 index",
+       tag = "C") +
+  scale_fill_manual(values = c("#2F86FF", "#EBAB16", "#DE0012"), aesthetics = c("colour", "fill")) +
+  theme(plot.subtitle = element_markdown(),
+        legend.position = "none")
+```
+
+Correlations with clinical variables
+
+```{r}
+clinical_vars <- c("FVC_baseline", "ppFVC_baseline", "DLCO_baseline", "ppDLCO_baseline", "FVC_change_1y", "survival_months")
+alpha_div_chao <- mutate(alpha_div_chao, survival_months = floor(survival_days / 30.4375))
+for (cv in clinical_vars) {
+  cor_df <- cor_test(data = alpha_div_chao, value, cv, method = "spearman")
+  pval <- cor_df$p
+  rho <- cor_df$cor
+  corr_results[str_c(cv, "chao1", sep = "_"), "p"] <- pval
+  if (pval < 0.05) {
+    print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
+  }
+}
+```
+
+```{r}
+ppFVC_chao_df <- cor_test(data = alpha_div_chao, value, ppFVC_baseline, method = "spearman")
+ppFVC_chao_pval <- ppFVC_chao_df$p
+ppFVC_chao_rho <- ppFVC_chao_df$cor
+
+fvc_chao_fig <- ggplot(alpha_div_chao, aes(x = ppFVC_baseline, y = value)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))), shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {ppFVC_chao_rho}<br>
+                       *p* = {signif(corr_results['ppFVC_baseline_chao1', 'padj'], 3)}"),
+       x = "Baseline FVC (% predicted)",
+       y = "Chao1 index",
+       tag = "E") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(face = "bold"))
+```
+
+```{r}
+DLCO_chao_df <- cor_test(data = alpha_div_chao, value, DLCO_baseline, method = "spearman")
+DLCO_chao_pval <- DLCO_chao_df$p
+DLCO_chao_rho <- DLCO_chao_df$cor
+
+ggplot(alpha_div_chao, aes(x = DLCO_baseline, y = value)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))), shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {DLCO_chao_rho}<br>
+                       *p* = {signif(DLCO_chao_pval, 3)}"),
+       x = "Baseline DLCO",
+       y = "Chao1 index") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(hjust = 0.5, face = "bold"))
+```
+
+```{r}
+ppDLCO_chao_df <- cor_test(data = alpha_div_chao, value, ppDLCO_baseline, method = "spearman")
+ppDLCO_chao_pval <- ppDLCO_chao_df$p
+ppDLCO_chao_rho <- ppDLCO_chao_df$cor
+
+dlco_chao_fig <- ggplot(alpha_div_chao, aes(x = ppDLCO_baseline, y = value)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))), shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {ppDLCO_chao_rho}<br>
+                       *p* < 0.0001"),
+       x = "Baseline DL<sub>CO</sub> (% predicted)",
+       y = "Chao1 index",
+       tag = "C") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(face = "bold"),
+        axis.title.x = element_markdown())
+```
+
+## Remove unidentified taxa
+
+```{r}
+physeq_id <- subset_taxa(physeq_nc, !is.na(Phylum))
+summarize_phyloseq(physeq_id)
+```
+
+## Filter out low abundance taxa (0.005% of samples or less)
+
+```{r}
+reads_per_taxa <- taxa_sums(physeq_id)
+physeq_abund <- prune_taxa((reads_per_taxa / sum(reads_per_taxa)) > 0.00005, physeq_id)
+physeq_abund
+```
+
+```{r}
+summarize_phyloseq(physeq_abund)
+```
+
+## Normalise reads sample by sample
+
+```{r}
+normalise_reads <- function(reads) {
+  reads / sum(reads)
+}
+physeq_rel <- transform_sample_counts(physeq_abund, normalise_reads)
+```
+
+# Export final preprocessed files
+
+```{r}
+otu_table <- as.data.frame(otu_table(physeq_rel))
+tax_table <- as.data.frame(tax_table(physeq_rel))
+tree <- phy_tree(physeq_rel)
+
+write.csv(otu_table, "Preprocessed Files/otu_table.csv")
+write.csv(tax_table, "Preprocessed Files/tax_table.csv")
+ape::write.tree(tree, "Preprocessed Files/tree.nwk")
+```
+
+Export OTU abundance tables aggregated by different taxonomic levels (with and without metadata)
+
+```{r}
+metadata_cols <- metadata %>% rownames_to_column("sample_id") %>% 
+  select(sample_id, key, diagnosis, MUC5B)
+
+export_agg_abund <- function(physeq, level) {
+  physeq_agg <- aggregate_taxa(physeq, level)
+  # Combine raw reads of taxa with the same name (e.g. Prevotella and [Prevotella])
+  abund_table <- as.data.frame(otu_table(physeq_agg)) %>% 
+    rownames_to_column("taxon") %>% 
+    mutate(taxon = str_remove_all(taxon, "\\[|\\]")) %>% # strip square brackets
+    group_by(taxon) %>% 
+    summarise(across(everything(), sum)) %>% # sum all columns within each group
+    column_to_rownames("taxon") %>% 
+    apply(2, normalise_reads) # normalise reads columnwise
+  # Without metadata
+  write.table(abund_table, file = glue("Preprocessed Files/{level}/{level}_rel_abund.txt"), col.names = NA, sep = "\t")
+  # With metadata
+  abund_table <- as.data.frame(t(abund_table)) %>% 
+    rownames_to_column("sample_id") %>% 
+    inner_join(metadata_cols, ., by = "sample_id")
+  write_csv(abund_table, glue("Preprocessed Files/{level}/{level}_rel_abund_metadata.csv"))
+}
+
+for (level in c("Phylum", "Family", "Genus", "Species")) {
+  export_agg_abund(physeq_abund, level)
+}
+```

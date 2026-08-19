@@ -1,0 +1,969 @@
+---
+title: "Microbiome Analysis by MUC5B Genotype"
+---
+
+# Load required packages
+
+```{r}
+library(rstatix)
+library(tidyverse)
+library(reshape2)
+library(vegan)
+library(phyloseq)
+library(microbiome)
+library(glue)
+library(ggrepel)
+library(ggtext)
+library(ggsci)
+library(Maaslin2)
+library(survival)
+library(survminer)
+library(circlize)
+library(ComplexHeatmap)
+library(gridtext)
+library(Cairo)
+library(patchwork)
+```
+
+# Load files
+
+```{r}
+setwd("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Microbiome Analysis")
+meta_muc5b <- read_csv("Metadata Processing/metadata_final.csv") %>%
+  drop_na(ddPCR, MUC5B) %>% filter(diagnosis == "IPF")
+abund_matrix <- read_csv("Preprocessed Files/Genus/Genus_rel_abund_corrected.csv") %>%
+  column_to_rownames(var = "sample_id") # batch corrected
+abund_family <- read_csv("Preprocessed Files/Family/Family_rel_abund_corrected.csv") %>%
+  column_to_rownames(var = "sample_id")
+```
+
+# Global plot settings
+
+```{r}
+theme_set(theme_classic() + theme(text = element_text(family = "Arial"),
+                                  plot.tag = element_text(face = "bold")))
+muc5b_palette <- c("#2F86FF", "#EBAB16", "#DE0012")
+```
+
+# Baseline patient characteristics
+
+## Continuous variables
+
+All patients
+
+```{r}
+summarise(meta_muc5b,
+          age_mean = mean(age, na.rm = TRUE), age_sd = sd(age, na.rm = TRUE),
+          ppFVC_mean = mean(ppFVC_baseline), ppFVC_sd = sd(ppFVC_baseline),
+          ppDLCO_mean = mean(ppDLCO_baseline, na.rm = TRUE), ppDLCO_sd = sd(ppDLCO_baseline, na.rm = TRUE))
+```
+
+By *MUC5B* genotype
+
+```{r}
+group_by(meta_muc5b, MUC5B) %>% summarise(count = n(),
+                                          age_mean = mean(age, na.rm = TRUE), age_sd = sd(age, na.rm = TRUE),
+                                          ppFVC_mean = mean(ppFVC_baseline), ppFVC_sd = sd(ppFVC_baseline),
+                                          ppDLCO_mean = mean(ppDLCO_baseline, na.rm = TRUE), ppDLCO_sd = sd(ppDLCO_baseline, na.rm = TRUE))
+```
+
+No. of samples missing age and baseline ppDLCO values
+
+```{r}
+filter(meta_muc5b, is.na(age)) %>% count(MUC5B)
+```
+
+```{r}
+filter(meta_muc5b, is.na(ppDLCO_baseline)) %>% count(MUC5B)
+```
+
+Test for differences between *MUC5B* groups
+
+```{r}
+kruskal_test(age ~ MUC5B, data = meta_muc5b)
+```
+
+```{r}
+kruskal_test(ppFVC_baseline ~ MUC5B, data = meta_muc5b)
+```
+
+```{r}
+kruskal_test(ppDLCO_baseline ~ MUC5B, data = meta_muc5b)
+```
+
+## Categorical variables
+
+All patients
+
+```{r}
+count(meta_muc5b, sex)
+```
+
+```{r}
+count(meta_muc5b, smoking_history)
+```
+
+```{r}
+count(meta_muc5b, study)
+```
+
+By *MUC5B* genotype
+
+```{r}
+count(meta_muc5b, MUC5B, sex)
+```
+
+```{r}
+count(meta_muc5b, MUC5B, smoking_history)
+```
+
+```{r}
+count(meta_muc5b, MUC5B, study)
+```
+
+Test for differences between *MUC5B* groups
+
+```{r}
+fisher_test(table(meta_muc5b$sex, meta_muc5b$MUC5B))
+```
+
+```{r}
+fisher_test(table(meta_muc5b$smoking_history, meta_muc5b$MUC5B))
+```
+
+```{r}
+fisher_test(table(meta_muc5b$study, meta_muc5b$MUC5B))
+```
+
+# Microbiome analysis
+
+## Bacterial burden
+
+```{r}
+bact_burden_pval <- kruskal_test(ddPCR ~ MUC5B, data = meta_muc5b)$p
+
+bb_fig <- ggplot(meta_muc5b, aes(x = MUC5B, y = ddPCR)) +
+  geom_boxplot(aes(fill = MUC5B), outliers = FALSE, alpha = 0.4) +
+  geom_jitter(aes(colour = MUC5B, shape = MUC5B), size = 1.2) +
+  scale_y_log10(labels = scales::label_log()) + 
+  labs(subtitle = glue("Kruskal Wallis *p* = {signif(bact_burden_pval, 3)}"),
+       x = "",
+       y = "Bacterial burden (16S rRNA gene/mL of BAL)") +
+  scale_fill_manual(values = muc5b_palette, aesthetics = c("colour", "fill")) +
+  theme(plot.subtitle = element_markdown(),
+        legend.position = "none")
+
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/bact_burden.svg", width = 6, height = 5)
+print(bb_fig)
+dev.off()
+```
+
+## Alpha diversity
+
+### Genus richness
+
+```{r}
+genus_no <- specnumber(abund_matrix) %>% 
+  as.data.frame() %>% 
+  cbind(meta_muc5b, .) %>% 
+  remove_rownames() %>% 
+  rename("genus_no" = ".")
+```
+
+```{r}
+genus_no_pval <- kruskal_test(genus_no ~ MUC5B, data = genus_no)$p
+
+genus_no_fig <- ggplot(genus_no, aes(x = MUC5B, y = genus_no)) +
+  geom_boxplot(aes(fill = MUC5B), outliers = FALSE, alpha = 0.4) +
+  geom_jitter(aes(colour = MUC5B, shape = MUC5B), size = 1.2) +
+  labs(subtitle = glue("Kruskal Wallis *p* = {signif(genus_no_pval, 3)}"),
+       x = "",
+       y = "No. of unique genera",
+       tag = "A") +
+  scale_fill_manual(values = muc5b_palette, aesthetics = c("colour", "fill")) +
+  theme(plot.subtitle = element_markdown(),
+        legend.position = "none")
+```
+
+### Shannon index
+
+```{r}
+shannon <- vegan::diversity(abund_matrix) %>% 
+  as.data.frame() %>% 
+  cbind(meta_muc5b, .) %>% 
+  remove_rownames() %>% 
+  rename("shannon" = ".")
+shannon_pval <- kruskal_test(shannon ~ MUC5B, data = shannon)$p
+
+shannon_fig <- ggplot(shannon, aes(x = MUC5B, y = shannon)) +
+  geom_boxplot(aes(fill = MUC5B), outliers = FALSE, alpha = 0.4) +
+  geom_jitter(aes(colour = MUC5B, shape = MUC5B), size = 1.2) +
+  labs(subtitle = glue("Kruskal Wallis *p* = {signif(shannon_pval, 3)}"),
+       x = "",
+       y = "Shannon index",
+       tag = "B") +
+  scale_fill_manual(values = muc5b_palette, aesthetics = c("colour", "fill")) +
+  theme(plot.subtitle = element_markdown(),
+        legend.position = "none")
+```
+
+```{r}
+fig <- genus_no_fig + shannon_fig + chao_fig
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/alpha.svg", width = 16, height = 5)
+print(fig)
+dev.off()
+```
+
+### Inverse Simpson index
+
+```{r}
+inv_simpson <- vegan::diversity(abund_matrix, index = "invsimpson") %>% 
+  as.data.frame() %>% 
+  cbind(meta_muc5b, .) %>% 
+  remove_rownames() %>% 
+  rename("inv_simpson" = ".")
+simpson_pval <- kruskal_test(inv_simpson ~ MUC5B, data = inv_simpson)$p
+
+ggplot(inv_simpson, aes(x = MUC5B, y = inv_simpson)) +
+  geom_boxplot(aes(fill = MUC5B), outliers = FALSE, alpha = 0.4) +
+  geom_jitter(aes(colour = MUC5B, shape = MUC5B), size = 1.2) +
+  scale_y_continuous(breaks = seq(0, 10, 2)) +
+  labs(subtitle = glue("Kruskal Wallis *p* = {signif(simpson_pval, 3)}"),
+       x = "",
+       y = "Inverse Simpson index") +
+  scale_fill_manual(values = muc5b_palette, aesthetics = c("colour", "fill")) +
+  theme(plot.subtitle = element_markdown(),
+        legend.position = "none")
+```
+
+## Beta diversity
+
+```{r}
+set.seed(2526)
+bray_permanova <- adonis2(abund_matrix ~ MUC5B, data = meta_muc5b)
+bray_pval <- bray_permanova$`Pr(>F)`[1]
+bray_r2 <- bray_permanova$R2[1]
+```
+
+Robust Aitchison is said to be better for non-negative compositional data:
+
+```{r}
+adonis2(abund_matrix ~ MUC5B, data = meta_muc5b, method = "robust.aitchison")
+```
+
+```{r}
+bray_dist <- vegdist(abund_matrix)
+pcoa <- cmdscale(bray_dist, eig = TRUE)
+
+pcoa_eig <- pcoa$eig
+total_variance <- sum(pcoa_eig[pcoa_eig > 0])
+percent_expl_pco1 <- (pcoa_eig[1] / total_variance) * 100
+percent_expl_pco2 <- (pcoa_eig[2] / total_variance) * 100
+
+pcoa_coord <- pcoa$points
+colnames(pcoa_coord) <- c("PCo1", "PCo2")
+bray_dissimilarity <- cbind(meta_muc5b, pcoa_coord)
+
+beta_fig <- ggplot(data = bray_dissimilarity, aes(x = PCo1, y = PCo2, colour = MUC5B)) + 
+  geom_point(aes(shape = MUC5B), size = 1.5) + stat_ellipse(linetype = 2) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
+         shape = "none") + 
+  labs(subtitle = glue("PERMANOVA *p* = {signif(bray_pval, 3)}<br>
+                       R<sup>2</sup> = {signif(bray_r2, 3)}"),
+       x = glue("PCo1 ({signif(percent_expl_pco1, 3)}%)"),
+       y = glue("PCo2 ({signif(percent_expl_pco2, 3)}%)")) +
+  scale_colour_manual(values = muc5b_palette) +
+  theme_bw() + theme(plot.subtitle = element_markdown(size = 10),
+                     legend.title = element_markdown(face = "bold"))
+
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/beta.svg", width = 7, height = 5)
+print(beta_fig)
+dev.off()
+```
+
+## Top 10 taxa
+
+### By Genus
+
+Identify top 10 genera
+
+```{r}
+abund_matrix <- abund_matrix * 100 # convert to %
+rowSums(abund_matrix)
+abund_sorted <- abund_matrix[, order(colSums(abund_matrix), decreasing = TRUE)]
+top_ten <- colnames(abund_sorted)[1:10]
+top_ten
+```
+
+Select abundance counts of top 10 genera and combine with metadata
+
+```{r}
+top_ten_abund <- cbind(meta_muc5b, abund_sorted[, top_ten]) %>% remove_rownames()
+```
+
+Test for statistically significant differences between *MUC5B* genotypes
+
+```{r}
+for (genus in top_ten) {
+  kruskal_result <- kruskal_test(top_ten_abund, as.formula(glue("{genus} ~ MUC5B")))
+  print(kruskal_result)
+  if (kruskal_result$p < 0.05) {
+    # Post-hoc Dunn's test
+    print(dunn_test(top_ten_abund, as.formula(glue("{genus} ~ MUC5B")), p.adjust.method = "holm"))
+  }
+}
+```
+
+```{r}
+top_ten_stats <- top_ten_abund %>%
+  select(sample_id, MUC5B, Streptococcus:Actinobacillus) %>% 
+  melt(id.vars = "MUC5B", # reshape to long data format
+       measure.vars = top_ten, 
+       variable.name = "Genus",
+       factorsAsStrings = TRUE) %>% # Genus is converted to a factor
+  group_by(MUC5B, Genus) %>%
+  summarise(median = median(value),
+            mean = mean(value),
+            q1 = quantile(value, 0.25),
+            q3 = quantile(value, 0.75)) %>% 
+  mutate(Phylum = case_when(Genus == "Rothia" ~ "Actinobacteria",
+                            Genus == "Actinomyces" ~ "Actinomycetota",
+                            Genus %in% c("Gemella", "Granulicatella") ~ "Bacillota",
+                            Genus == "Prevotella" ~ "Bacteroidetes",
+                            Genus %in% c("Streptococcus", "Veillonella") ~ "Firmicutes",
+                            Genus %in% c("Actinobacillus", "Haemophilus", "Neisseria") ~ "Pseudomonadota"))
+```
+
+Horizontal bar chart
+
+```{r}
+tt_fig <- ggplot(top_ten_stats, aes(x = median, y = Genus)) +
+  geom_col(aes(fill = Phylum), colour = "black", linewidth = 0.5) +
+  geom_errorbar(aes(xmin = q1, xmax = q3, y = Genus), orientation = "y",
+                width = 0.3, linewidth = 0.5) +
+  labs(x = "Relative abundance (%)", y = "") +
+  facet_grid(. ~ MUC5B) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(axis.text.y = element_text(size = 11, face = "italic", colour = c(rep("#852F88", 3), rep("black", 7))),
+        legend.title = element_text(face = "bold"),
+        legend.text = element_text(face = "italic"),
+        strip.background = element_blank(), # remove boxes around facet titles
+        strip.text = element_text(size = 14, face = "bold"))
+
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/top_ten.svg", width = 8, height = 5)
+print(tt_fig)
+dev.off()
+```
+
+Vertical column chart
+
+```{r}
+ggplot(top_ten_stats, aes(x = Genus, y = median)) +
+  geom_col(aes(fill = Phylum), colour = "black", linewidth = 0.5) +
+  geom_errorbar(aes(x = Genus, ymin = q1, ymax = q3),
+                width = 0.3, linewidth = 0.5) +
+  labs(x = "", y = "Relative abundance (%)") +
+  facet_grid(MUC5B ~ .) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 11, face = "italic"),
+        legend.title = element_text(hjust = 0.5, face = "bold"),
+        legend.text = element_text(face = "italic"),
+        strip.background = element_blank(),
+        strip.text.y.right = element_text(angle = 0, size = 14, face = "bold"))
+```
+
+### By Family
+
+```{r}
+# Top 10 families
+abund_family <- abund_family * 100
+rowSums(abund_family)
+abund_family_sorted <- abund_family[, order(colSums(abund_family), decreasing = TRUE)]
+top_ten_families <- colnames(abund_family_sorted)[1:10]
+top_ten_families
+
+# Abundance counts of top 10 families
+top_ten_abund_family <- cbind(meta_muc5b, abund_family_sorted[, top_ten_families]) %>% remove_rownames()
+
+# Test for differences between MUC5B genotypes
+for (family in top_ten_families) {
+  kruskal_result <- kruskal_test(top_ten_abund_family, as.formula(glue("{family} ~ MUC5B")))
+  print(kruskal_result)
+  if (kruskal_result$p < 0.05) {
+    # Post-hoc Dunn's test
+    print(dunn_test(top_ten_abund_family, as.formula(glue("{family} ~ MUC5B")), p.adjust.method = "holm"))
+  }
+}
+```
+
+Bar chart
+
+```{r}
+top_ten_stats_family <- top_ten_abund_family %>%
+  select(sample_id, MUC5B, Streptococcaceae:Staphylococcaceae) %>% 
+  melt(id.vars = "MUC5B", # reshape to long data format
+       measure.vars = top_ten_families, 
+       variable.name = "Family",
+       factorsAsStrings = TRUE) %>% # Family is converted to a factor
+  group_by(MUC5B, Family) %>%
+  summarise(median = median(value),
+            mean = mean(value),
+            q1 = quantile(value, 0.25),
+            q3 = quantile(value, 0.75))
+
+ggplot(top_ten_stats_family, aes(x = median, y = Family)) +
+  geom_col(aes(fill = Family), colour = "black", linewidth = 0.5) +
+  geom_errorbar(aes(xmin = q1, xmax = q3, y = Family), orientation = "y",
+                width = 0.3, linewidth = 0.5) +
+  labs(x = "Relative abundance (%)", y = "") +
+  facet_grid(. ~ MUC5B) +
+  theme(axis.text.y = element_text(size = 11, face = "italic"),
+        # legend.title = element_text(face = "bold"),
+        legend.text = element_text(face = "italic"),
+        strip.background = element_blank(), # remove boxes around facet titles
+        strip.text = element_text(size = 14, face = "bold"))
+```
+
+## Top 50 taxa
+
+### By Genus
+
+```{r}
+# Top 50 genera
+top_fifty <- colnames(abund_sorted)[c(1:13, 15:51)] # 14th genus is Unknown
+top_fifty
+
+# Abundance counts of top 50 genera
+top_fifty_abund <- cbind(meta_muc5b, abund_sorted[, top_fifty]) %>% remove_rownames()
+
+# Test for differences between MUC5B genotypes
+top_genus_results <- data.frame(p = rep(0, times = 50), padj = rep(0, times = 50), row.names = top_fifty)
+
+for (genus in top_fifty) {
+  kruskal_result <- kruskal_test(top_fifty_abund, as.formula(glue("{genus} ~ MUC5B")))
+  top_genus_results[genus, "p"] <- kruskal_result$p
+}
+
+top_genus_results$padj <- p.adjust(top_genus_results$p, method = "BH")
+top_genus_results$padj < 0.05
+```
+
+### By Family
+
+```{r}
+# Top 50 families
+top_fifty_families <- colnames(abund_family_sorted)[c(1:18, 20:49)] # 19th family is Unknown, all other families are not present in any sample
+top_fifty_families
+
+# Abundance counts of top 50 families
+top_fifty_abund_family <- cbind(meta_muc5b, abund_family_sorted[, top_fifty_families]) %>% remove_rownames()
+
+# Test for differences between MUC5B genotypes
+top_family_results <- data.frame(p = rep(0, times = 48), padj = rep(0, times = 48), row.names = top_fifty_families)
+
+for (family in top_fifty_families) {
+  kruskal_result <- kruskal_test(top_fifty_abund_family, as.formula(glue("{family} ~ MUC5B")))
+  top_family_results[family, "p"] <- kruskal_result$p
+}
+
+top_family_results$padj <- p.adjust(top_family_results$p, method = "BH")
+top_family_results$padj < 0.05
+```
+
+## Differentially abundant taxa
+
+### By Genus
+
+```{r}
+meta_muc5b <- column_to_rownames(meta_muc5b, "sample_id")
+Maaslin2(abund_matrix, meta_muc5b, output = "MaAsLin2 Output/Genus",
+         min_prevalence = 0, normalization = "NONE",
+         # abundance data is already pre-filtered and pre-normalised
+         fixed_effects = c("MUC5B"), reference = c("MUC5B,G/G"))
+```
+
+*Bacteroides* is significantly differentially expressed between G/G and T/T groups.
+
+```{r}
+bacteroides_abund <- cbind(select(meta_muc5b, MUC5B), abund_matrix$Bacteroides) %>%
+  rename(Bacteroides = "abund_matrix$Bacteroides")
+summary(bacteroides_abund)
+```
+
+Only 1 patient with T/T genotype has *Bacteroides* found in their microbiome. *Bacteroides* is absent from all other patients.
+
+### By Family
+
+```{r}
+Maaslin2(abund_family, meta_muc5b, output = "MaAsLin2 Output/Family",
+         min_prevalence = 0.1, normalization = "NONE",
+         fixed_effects = c("MUC5B"), reference = c("MUC5B,G/G"))
+```
+
+# Survival analysis
+
+```{r}
+meta_muc5b <- mutate(meta_muc5b, survival_months = floor(survival_days / 30.4375))
+```
+
+## Fit survival data using Kaplan-Meier method
+
+```{r}
+surv_object <- Surv(meta_muc5b$survival_months)
+surv_muc5b <- survfit(surv_object ~ MUC5B, data = meta_muc5b)
+summary(surv_muc5b)
+```
+
+```{r}
+kaplan_pval <- surv_pvalue(surv_muc5b, data = meta_muc5b)$pval
+```
+
+```{r}
+survplot <- ggsurvplot(surv_muc5b, data = meta_muc5b, fun = "pct",
+                       palette = muc5b_palette, size = 0.5,
+                       conf.int = TRUE, conf.int.alpha = 0.2, risk.table = TRUE,
+                       xlab = "Time (months)", ylab = "Percent survival",
+                       legend = "right", legend.title = "*MUC5B* Genotype",
+                       legend.labs = c("G/G", "G/T", "T/T"),
+                       font.main = 11, font.x = 11, font.y = 11,
+                       font.tickslab = 11, font.legend = 11,
+                       risk.table.fontsize = 4) # risk table uses a different scale
+survplot$plot <- survplot$plot +
+  geom_richtext(aes(x = 1, y = 10, label = glue("Log-rank *p* = {signif(kaplan_pval, 3)}")),
+                fill = NA, label.color = NA, hjust = 0, size = 4) +
+  theme(legend.title = element_markdown(face = "bold"))
+survplot$table <- survplot$table +
+  theme(axis.line.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        plot.title = element_text(size = 11))
+survplot
+
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/kaplan_meier.svg", width = 8, height = 5)
+print(survplot)
+dev.off()
+```
+
+No significant difference in survival between groups but T/T group has a gentler gradient, possibly indicating better survival.
+
+## Fit Cox proportional hazards model
+
+```{r}
+coxph_muc5b <- coxph(surv_object ~ MUC5B + study, data = meta_muc5b)
+ggforest(coxph_muc5b, data = meta_muc5b)
+```
+
+PROFOUND patients had poorer survival.
+
+# Clustered heatmap
+
+## Cluster samples
+
+```{r}
+top_ten_counts <- abund_sorted[, top_ten]
+which(rowSums(top_ten_counts) == 0)
+```
+
+Remove BRU.05380 from heatmap
+
+```{r}
+top_ten_counts <- filter(top_ten_counts, row.names(top_ten_counts) != "BRU.05380")
+```
+
+UPGMA on Bray-Curtis dissimilarities
+
+```{r}
+sample_dist <- vegdist(top_ten_counts)
+col_clustering <- hclust(sample_dist, "average")
+genera_dist <- vegdist(t(top_ten_counts))
+row_clustering <- hclust(genera_dist, "average")
+```
+
+## Plot heatmap
+
+```{r}
+heatmap_matrix <- as.matrix(t(top_ten_counts)) # taxa as rows, samples as columns
+```
+
+Create column annotations
+
+```{r}
+anno_df <- meta_muc5b %>% filter(row.names(meta_muc5b) != "BRU.05380") %>% 
+  select(c(FVC_change_1y, status_1y, MUC5B))
+
+rownames(anno_df) == colnames(heatmap_matrix) # check that samples are in the same order
+
+fvc_palette <- colorRamp2(seq(-50, 50, 25), c("#B2182B", "#F4A582", "white", "#92C5DE", "#2166AC"))
+muc5b_palette_anno <- muc5b_palette
+names(muc5b_palette_anno) <- c("G/G", "G/T", "T/T")
+anno_palette <- list(FVC_change_1y = fvc_palette,
+                     status_1y = c("Stable" = "#499F31",
+                                   "Semi-progressive" = "#B896D6",
+                                   "Progressive" = "#783DBA"),
+                     MUC5B = muc5b_palette_anno)
+
+col_anno <- HeatmapAnnotation(df = anno_df,
+                              col = anno_palette,
+                              annotation_label = gt_render(c("Relative FVC Change (%)",
+                                                             "Status",
+                                                             "*MUC5B* Genotype")),
+                              annotation_name_gp = gpar(fontsize = 10),
+                              annotation_legend_param = list(FVC_change_1y = list(title = "Relative\nFVC Change (%)"),
+                                                             status_1y = list(title = "Status"),
+                                                             MUC5B = list(title = gt_render("*MUC5B* Genotype"))))
+```
+
+Option to arrange columns by *MUC5B* genotype
+
+```{r}
+anno_df_by_geno <- arrange(anno_df, MUC5B)
+rownames(anno_df_by_geno)
+```
+
+Create heatmap with column annotations
+
+```{r}
+abund_palette <- colorRamp2(seq(0, 100, 20), c("white", "#F8D7DA", "#EA868F", "#DC3545", "#842029", "#2C0B0E"))
+
+hm1 <- Heatmap(heatmap_matrix,
+        name = "Relative\nAbundance (%)", # legend title
+        col = abund_palette,
+        rect_gp = gpar(col = "white", lwd = 0.5), # cell borders
+        
+        column_title = "Samples",
+        column_title_side = "bottom",
+        column_title_gp = gpar(fontsize = 10),
+        
+        cluster_rows = row_clustering, # previously calculated clustering
+        cluster_columns = col_clustering,
+        
+        row_names_side = "left",
+        row_names_gp = gpar(fontsize = 10, fontface = "italic"),
+        show_column_names = FALSE,
+        
+        top_annotation = col_anno, # column annotations
+        
+        heatmap_legend_param = list(title_gp = gpar(fontsize = 10, fontface = "bold"),
+                                    at = seq(0, 100, 20),
+                                    labels = as.character(seq(0, 100, 20)),
+                                    labels_gp = gpar(fontsize = 10)))
+
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/heatmap.svg", width = 15, height = 6)
+draw(hm1)
+dev.off()
+
+hm2 <- Heatmap(heatmap_matrix,
+        name = "Relative\nAbundance (%)", # legend title
+        col = abund_palette,
+        rect_gp = gpar(col = "white", lwd = 0.5), # cell borders
+        
+        column_title = "Samples",
+        column_title_side = "bottom",
+        column_title_gp = gpar(fontsize = 10),
+        
+        cluster_rows = row_clustering, # previously calculated clustering
+        column_order = rownames(anno_df_by_geno),
+        
+        row_names_side = "left",
+        row_names_gp = gpar(fontsize = 10, fontface = "italic"),
+        show_column_names = FALSE,
+        
+        top_annotation = col_anno, # column annotations
+        
+        heatmap_legend_param = list(title_gp = gpar(fontsize = 10, fontface = "bold"),
+                                    at = seq(0, 100, 20),
+                                    labels = as.character(seq(0, 100, 20)),
+                                    labels_gp = gpar(fontsize = 10)))
+
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/heatmap_by_muc5b.svg", width = 15, height = 6)
+draw(hm2)
+dev.off()
+```
+
+## Test for associations between microbial composition and clinical variables
+
+```{r}
+adonis2(abund_matrix ~ FVC_change_1y, data = meta_muc5b, na.action = na.omit)
+```
+
+```{r}
+adonis2(abund_matrix ~ status_1y, data = meta_muc5b, na.action = na.omit)
+```
+
+# Microbiome correlations with clinical variables
+
+```{r}
+clinical_vars <- c("ppFVC_baseline", "ppDLCO_baseline", "FVC_change_1y", "survival_months")
+
+# Adjust p-values for multiple comparisons
+corr_results <- data.frame(p = rep(0, 16), padj = rep(0, 16),
+                           row.names = c("ppFVC_baseline_burden", "ppDLCO_baseline_burden", "FVC_change_1y_burden", "survival_months_burden",
+                                         "ppFVC_baseline_richness", "ppDLCO_baseline_richness", "FVC_change_1y_richness", "survival_months_richness",
+                                         "ppFVC_baseline_shannon", "ppDLCO_baseline_shannon", "FVC_change_1y_shannon", "survival_months_shannon",
+                                         "ppFVC_baseline_chao1", "ppDLCO_baseline_chao1", "FVC_change_1y_chao1", "survival_months_chao1"))
+```
+
+## Bacterial burden
+
+```{r}
+for (cv in clinical_vars) {
+  cor_df <- cor_test(data = meta_muc5b, ddPCR, cv, method = "spearman")
+  pval <- cor_df$p
+  rho <- cor_df$cor
+  corr_results[str_c(cv, "burden", sep = "_"), "p"] <- pval
+  if (pval < 0.05) {
+    print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
+  }
+}
+```
+
+## Genus richness
+
+```{r}
+genus_no <- mutate(genus_no, survival_months = floor(survival_days / 30.4375))
+
+for (cv in clinical_vars) {
+  cor_df <- cor_test(data = genus_no, genus_no, cv, method = "spearman")
+  pval <- cor_df$p
+  rho <- cor_df$cor
+  corr_results[str_c(cv, "richness", sep = "_"), "p"] <- pval
+  if (pval < 0.05) {
+    print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
+  }
+}
+```
+
+Baseline FVC
+
+```{r}
+FVC_richness_df <- cor_test(data = genus_no, genus_no, FVC_baseline, method = "spearman")
+FVC_richness_pval <- FVC_richness_df$p
+FVC_richness_rho <- FVC_richness_df$cor
+```
+
+```{r}
+ggplot(genus_no, aes(x = FVC_baseline, y = genus_no)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
+         shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {FVC_richness_rho}<br>
+                       *p* = {signif(FVC_richness_pval, 3)}"),
+       x = "Baseline FVC",
+       y = "No. of unique genera") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(face = "bold"))
+```
+
+Baseline ppFVC
+
+```{r}
+ppFVC_richness_df <- cor_test(data = genus_no, genus_no, ppFVC_baseline, method = "spearman")
+ppFVC_richness_pval <- ppFVC_richness_df$p
+ppFVC_richness_rho <- ppFVC_richness_df$cor
+```
+
+```{r}
+fvc_gen_fig <- ggplot(genus_no, aes(x = ppFVC_baseline, y = genus_no)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
+         shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {ppFVC_richness_rho}<br>
+                       *p* = {signif(corr_results['ppFVC_baseline_richness', 'padj'], 3)}"),
+       x = "Baseline FVC (% predicted)",
+       y = "No. of unique genera",
+       tag = "D") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(face = "bold"))
+```
+
+Baseline DLCO
+
+```{r}
+DLCO_richness_df <- cor_test(data = genus_no, genus_no, DLCO_baseline, method = "spearman")
+DLCO_richness_pval <- DLCO_richness_df$p
+DLCO_richness_rho <- DLCO_richness_df$cor
+```
+
+```{r}
+ggplot(genus_no, aes(x = DLCO_baseline, y = genus_no)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
+         shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {DLCO_richness_rho}<br>
+                       *p* = {signif(DLCO_richness_pval, 3)}"),
+       x = "Baseline DLCO",
+       y = "No. of unique genera") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(face = "bold"))
+```
+
+Baseline ppDLCO
+
+```{r}
+ppDLCO_richness_df <- cor_test(genus_no, ppDLCO_baseline, genus_no, method = "spearman")
+ppDLCO_richness_rho <- ppDLCO_richness_df$cor
+ppDLCO_richness_pval <- ppDLCO_richness_df$p
+```
+
+```{r}
+dlco_gen_fig <- ggplot(genus_no, aes(x = ppDLCO_baseline, y = genus_no)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
+         shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {ppDLCO_richness_rho}<br>
+                       *p* = {signif(corr_results['ppDLCO_baseline_richness', 'padj'], 3)}"),
+       x = "Baseline DL<sub>CO</sub> (% predicted)",
+       y = "No. of unique genera",
+       tag = "A") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(face = "bold"),
+        axis.title.x = element_markdown())
+```
+
+## Shannon index
+
+```{r}
+shannon <- mutate(shannon, survival_months = floor(survival_days / 30.4375))
+
+for (cv in clinical_vars) {
+  cor_df <- cor_test(data = shannon, shannon, cv, method = "spearman")
+  pval <- cor_df$p
+  rho <- cor_df$cor
+  corr_results[str_c(cv, "shannon", sep = "_"), "p"] <- pval
+  if (pval < 0.05) {
+    print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
+  }
+}
+```
+
+Baseline ppFVC
+
+```{r}
+ppFVC_shannon_df <- cor_test(data = shannon, shannon, ppFVC_baseline, method = "spearman")
+ppFVC_shannon_pval <- ppFVC_shannon_df$p
+ppFVC_shannon_rho <- ppFVC_shannon_df$cor
+```
+
+```{r}
+fvc_shannon_fig <- ggplot(shannon, aes(x = ppFVC_baseline, y = shannon)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
+         shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {ppFVC_shannon_rho}<br>
+                       *p* = {signif(ppFVC_shannon_pval, 3)}"),
+       x = "Baseline FVC (% predicted)",
+       y = "Shannon index") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(face = "bold"))
+```
+
+Baseline DLCO
+
+```{r}
+DLCO_shannon_df <- cor_test(data = shannon, shannon, DLCO_baseline, method = "spearman")
+DLCO_shannon_pval <- DLCO_shannon_df$p
+DLCO_shannon_rho <- DLCO_shannon_df$cor
+```
+
+```{r}
+ggplot(shannon, aes(x = DLCO_baseline, y = shannon)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
+         shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {DLCO_shannon_rho}<br>
+                       *p* = {signif(DLCO_shannon_pval, 3)}"),
+       x = "Baseline DLCO",
+       y = "Shannon index") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(face = "bold"))
+```
+
+Baseline ppDLCO
+
+```{r}
+ppDLCO_shannon_df <- cor_test(data = shannon, shannon, ppDLCO_baseline, method = "spearman")
+ppDLCO_shannon_pval <- ppDLCO_shannon_df$p
+ppDLCO_shannon_rho <- ppDLCO_shannon_df$cor
+```
+
+```{r}
+dlco_shannon_fig <- ggplot(shannon, aes(x = ppDLCO_baseline, y = shannon)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
+         shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {ppDLCO_shannon_rho}<br>
+                       *p* = {signif(corr_results['ppDLCO_baseline_shannon', 'padj'], 3)}"),
+       x = "Baseline DL<sub>CO</sub> (% predicted)",
+       y = "Shannon index",
+       tag = "B") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(face = "bold"),
+        axis.title.x = element_markdown())
+```
+
+```{r}
+corr_results$padj <- p.adjust(corr_results$p, method = "BH")
+corr_results$is_signif <- corr_results$padj < 0.05
+```
+
+```{r}
+fig <- (dlco_gen_fig | dlco_shannon_fig | dlco_chao_fig) /
+  (plot_spacer() | fvc_gen_fig | fvc_chao_fig | plot_spacer()) +
+  plot_layout(guides = "collect", widths = c(1, 1, 1))
+
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/clin_feat.svg", width = 18, height = 10)
+print(fig)
+dev.off()
+```
+
+## Inverse Simpson index
+
+```{r}
+inv_simpson <- mutate(inv_simpson, survival_months = floor(survival_days / 30.4375))
+
+for (cv in clinical_vars) {
+  cor_df <- cor_test(data = inv_simpson, inv_simpson, cv, method = "spearman")
+  pval <- cor_df$p
+  rho <- cor_df$cor
+  if (pval < 0.05) {
+    print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
+  }
+}
+```
+
+```{r}
+ppDLCO_invsimp_df <- cor_test(data = inv_simpson, inv_simpson, ppDLCO_baseline, method = "spearman")
+ppDLCO_invsimp_pval <- ppDLCO_invsimp_df$p
+ppDLCO_invsimp_rho <- ppDLCO_invsimp_df$cor
+
+ggplot(inv_simpson, aes(x = ppDLCO_baseline, y = inv_simpson)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
+         shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {ppDLCO_invsimp_rho}<br>
+                       *p* = {signif(ppDLCO_invsimp_pval, 3)}"),
+       x = "Baseline predicted percent DLCO",
+       y = "Inverse Simpson index") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(hjust = 0.5, face = "bold"))
+```
