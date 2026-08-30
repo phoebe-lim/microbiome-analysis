@@ -148,7 +148,7 @@ bb_fig <- ggplot(meta_muc5b, aes(x = MUC5B, y = ddPCR)) +
   scale_y_log10(labels = scales::label_log()) + 
   labs(subtitle = glue("Kruskal Wallis *p* = {signif(bact_burden_pval, 3)}"),
        x = "",
-       y = "Bacterial burden (16S rRNA gene/mL of BAL)") +
+       y = "Bacterial burden (16S rRNA gene/mL of BALF)") +
   scale_fill_manual(values = muc5b_palette, aesthetics = c("colour", "fill")) +
   theme(plot.subtitle = element_markdown(),
         legend.position = "none")
@@ -265,14 +265,16 @@ colnames(pcoa_coord) <- c("PCo1", "PCo2")
 bray_dissimilarity <- cbind(meta_muc5b, pcoa_coord)
 
 beta_fig <- ggplot(data = bray_dissimilarity, aes(x = PCo1, y = PCo2, colour = MUC5B)) + 
-  geom_point(aes(shape = MUC5B), size = 1.5) + stat_ellipse(linetype = 2) +
-  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
-         shape = "none") + 
+  geom_point(aes(shape = MUC5B), size = 1.5) + stat_ellipse(aes(fill = MUC5B), linetype = 2, geom = "polygon", alpha = 0.1) +
+  guides(shape = guide_legend(title = "*MUC5B* Genotype", override.aes = list(colour = muc5b_palette)),
+         colour = "none",
+         fill = "none") + 
   labs(subtitle = glue("PERMANOVA *p* = {signif(bray_pval, 3)}<br>
                        R<sup>2</sup> = {signif(bray_r2, 3)}"),
        x = glue("PCo1 ({signif(percent_expl_pco1, 3)}%)"),
        y = glue("PCo2 ({signif(percent_expl_pco2, 3)}%)")) +
   scale_colour_manual(values = muc5b_palette) +
+  scale_fill_manual(values = muc5b_palette) +
   theme_bw() + theme(plot.subtitle = element_markdown(size = 10),
                      legend.title = element_markdown(face = "bold"))
 
@@ -504,12 +506,14 @@ Maaslin2(abund_family, meta_muc5b, output = "MaAsLin2 Output/Family",
 
 ```{r}
 meta_muc5b <- mutate(meta_muc5b, survival_months = floor(survival_days / 30.4375))
+meta_muc5b <- mutate(meta_muc5b, death = if_else(death == "Yes", 1, 0))
 ```
 
 ## Fit survival data using Kaplan-Meier method
 
 ```{r}
-surv_object <- Surv(meta_muc5b$survival_months)
+surv_object <- Surv(time = meta_muc5b$survival_months, event = meta_muc5b$death)
+surv_object
 surv_muc5b <- survfit(surv_object ~ MUC5B, data = meta_muc5b)
 summary(surv_muc5b)
 ```
@@ -521,15 +525,16 @@ kaplan_pval <- surv_pvalue(surv_muc5b, data = meta_muc5b)$pval
 ```{r}
 survplot <- ggsurvplot(surv_muc5b, data = meta_muc5b, fun = "pct",
                        palette = muc5b_palette, size = 0.5,
-                       conf.int = TRUE, conf.int.alpha = 0.2, risk.table = TRUE,
-                       xlab = "Time (months)", ylab = "Percent survival",
+                       conf.int = TRUE, conf.int.alpha = 0.15, risk.table = TRUE,
+                       xlab = "Time (months)",
                        legend = "right", legend.title = "*MUC5B* Genotype",
                        legend.labs = c("G/G", "G/T", "T/T"),
+                       break.time.by = 6, xlim = c(0, 36), ylim = c(40, 100),
                        font.main = 11, font.x = 11, font.y = 11,
                        font.tickslab = 11, font.legend = 11,
                        risk.table.fontsize = 4) # risk table uses a different scale
 survplot$plot <- survplot$plot +
-  geom_richtext(aes(x = 1, y = 10, label = glue("Log-rank *p* = {signif(kaplan_pval, 3)}")),
+  geom_richtext(aes(x = 1, y = 50, label = glue("Log-rank *p* = {signif(kaplan_pval, 3)}")),
                 fill = NA, label.color = NA, hjust = 0, size = 4) +
   theme(legend.title = element_markdown(face = "bold"))
 survplot$table <- survplot$table +
@@ -554,10 +559,8 @@ No significant difference in survival between groups but T/T group has a gentler
 
 ```{r}
 coxph_muc5b <- coxph(surv_object ~ MUC5B + study, data = meta_muc5b)
-ggforest(coxph_muc5b, data = meta_muc5b)
+ggforest(coxph_muc5b, data = as.data.frame(meta_muc5b))
 ```
-
-PROFOUND patients had poorer survival.
 
 # Clustered heatmap
 
@@ -657,22 +660,22 @@ draw(hm1)
 dev.off()
 
 hm2 <- Heatmap(heatmap_matrix,
-        name = "Relative\nAbundance (%)", # legend title
+        name = "Relative\nAbundance (%)",
         col = abund_palette,
-        rect_gp = gpar(col = "white", lwd = 0.5), # cell borders
+        rect_gp = gpar(col = "white", lwd = 0.5),
         
         column_title = "Samples",
         column_title_side = "bottom",
         column_title_gp = gpar(fontsize = 10),
         
-        cluster_rows = row_clustering, # previously calculated clustering
+        cluster_rows = row_clustering,
         column_order = rownames(anno_df_by_geno),
         
         row_names_side = "left",
         row_names_gp = gpar(fontsize = 10, fontface = "italic"),
         show_column_names = FALSE,
         
-        top_annotation = col_anno, # column annotations
+        top_annotation = col_anno,
         
         heatmap_legend_param = list(title_gp = gpar(fontsize = 10, fontface = "bold"),
                                     at = seq(0, 100, 20),
@@ -697,17 +700,16 @@ adonis2(abund_matrix ~ status_1y, data = meta_muc5b, na.action = na.omit)
 # Microbiome correlations with clinical variables
 
 ```{r}
-clinical_vars <- c("ppFVC_baseline", "ppDLCO_baseline", "FVC_change_1y", "survival_months")
+clinical_vars <- c("ppFVC_baseline", "ppDLCO_baseline", "FVC_change_1y")
 
-# Adjust p-values for multiple comparisons
-corr_results <- data.frame(p = rep(0, 16), padj = rep(0, 16),
-                           row.names = c("ppFVC_baseline_burden", "ppDLCO_baseline_burden", "FVC_change_1y_burden", "survival_months_burden",
-                                         "ppFVC_baseline_richness", "ppDLCO_baseline_richness", "FVC_change_1y_richness", "survival_months_richness",
-                                         "ppFVC_baseline_shannon", "ppDLCO_baseline_shannon", "FVC_change_1y_shannon", "survival_months_shannon",
-                                         "ppFVC_baseline_chao1", "ppDLCO_baseline_chao1", "FVC_change_1y_chao1", "survival_months_chao1"))
+corr_results <- data.frame(p = rep(0, 12), rho = rep(0, 12), padj = rep(0, 12),
+                           row.names = c("ppFVC_baseline_burden", "ppDLCO_baseline_burden", "FVC_change_1y_burden",
+                                         "ppFVC_baseline_richness", "ppDLCO_baseline_richness", "FVC_change_1y_richness",
+                                         "ppFVC_baseline_shannon", "ppDLCO_baseline_shannon", "FVC_change_1y_shannon",
+                                         "ppFVC_baseline_chao1", "ppDLCO_baseline_chao1", "FVC_change_1y_chao1"))
 ```
 
-## Bacterial burden
+Bacterial burden
 
 ```{r}
 for (cv in clinical_vars) {
@@ -715,105 +717,53 @@ for (cv in clinical_vars) {
   pval <- cor_df$p
   rho <- cor_df$cor
   corr_results[str_c(cv, "burden", sep = "_"), "p"] <- pval
+  corr_results[str_c(cv, "burden", sep = "_"), "rho"] <- rho
   if (pval < 0.05) {
     print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
   }
 }
 ```
 
-## Genus richness
+Genus richness
 
 ```{r}
-genus_no <- mutate(genus_no, survival_months = floor(survival_days / 30.4375))
-
 for (cv in clinical_vars) {
   cor_df <- cor_test(data = genus_no, genus_no, cv, method = "spearman")
   pval <- cor_df$p
   rho <- cor_df$cor
   corr_results[str_c(cv, "richness", sep = "_"), "p"] <- pval
+  corr_results[str_c(cv, "richness", sep = "_"), "rho"] <- rho
   if (pval < 0.05) {
     print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
   }
 }
 ```
 
-Baseline FVC
+Shannon index
 
 ```{r}
-FVC_richness_df <- cor_test(data = genus_no, genus_no, FVC_baseline, method = "spearman")
-FVC_richness_pval <- FVC_richness_df$p
-FVC_richness_rho <- FVC_richness_df$cor
+for (cv in clinical_vars) {
+  cor_df <- cor_test(data = shannon, shannon, cv, method = "spearman")
+  pval <- cor_df$p
+  rho <- cor_df$cor
+  corr_results[str_c(cv, "shannon", sep = "_"), "p"] <- pval
+  corr_results[str_c(cv, "shannon", sep = "_"), "rho"] <- rho
+  if (pval < 0.05) {
+    print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
+  }
+}
 ```
+
+Adjust *p*-values for multiple comparisons
 
 ```{r}
-ggplot(genus_no, aes(x = FVC_baseline, y = genus_no)) +
-  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
-  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
-  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
-         shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {FVC_richness_rho}<br>
-                       *p* = {signif(FVC_richness_pval, 3)}"),
-       x = "Baseline FVC",
-       y = "No. of unique genera") +
-  scale_colour_manual(values = muc5b_palette) +
-  theme(plot.subtitle = element_markdown(),
-        legend.title = element_markdown(face = "bold"))
+corr_results$padj <- p.adjust(corr_results$p, method = "BH")
+corr_results$is_signif <- corr_results$padj < 0.05
 ```
 
-Baseline ppFVC
+## Linear regression plots
 
-```{r}
-ppFVC_richness_df <- cor_test(data = genus_no, genus_no, ppFVC_baseline, method = "spearman")
-ppFVC_richness_pval <- ppFVC_richness_df$p
-ppFVC_richness_rho <- ppFVC_richness_df$cor
-```
-
-```{r}
-fvc_gen_fig <- ggplot(genus_no, aes(x = ppFVC_baseline, y = genus_no)) +
-  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
-  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
-  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
-         shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {ppFVC_richness_rho}<br>
-                       *p* = {signif(corr_results['ppFVC_baseline_richness', 'padj'], 3)}"),
-       x = "Baseline FVC (% predicted)",
-       y = "No. of unique genera",
-       tag = "D") +
-  scale_colour_manual(values = muc5b_palette) +
-  theme(plot.subtitle = element_markdown(),
-        legend.title = element_markdown(face = "bold"))
-```
-
-Baseline DLCO
-
-```{r}
-DLCO_richness_df <- cor_test(data = genus_no, genus_no, DLCO_baseline, method = "spearman")
-DLCO_richness_pval <- DLCO_richness_df$p
-DLCO_richness_rho <- DLCO_richness_df$cor
-```
-
-```{r}
-ggplot(genus_no, aes(x = DLCO_baseline, y = genus_no)) +
-  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
-  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
-  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
-         shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {DLCO_richness_rho}<br>
-                       *p* = {signif(DLCO_richness_pval, 3)}"),
-       x = "Baseline DLCO",
-       y = "No. of unique genera") +
-  scale_colour_manual(values = muc5b_palette) +
-  theme(plot.subtitle = element_markdown(),
-        legend.title = element_markdown(face = "bold"))
-```
-
-Baseline ppDLCO
-
-```{r}
-ppDLCO_richness_df <- cor_test(genus_no, ppDLCO_baseline, genus_no, method = "spearman")
-ppDLCO_richness_rho <- ppDLCO_richness_df$cor
-ppDLCO_richness_pval <- ppDLCO_richness_df$p
-```
+Genus richness against ppDLCO
 
 ```{r}
 dlco_gen_fig <- ggplot(genus_no, aes(x = ppDLCO_baseline, y = genus_no)) +
@@ -821,7 +771,7 @@ dlco_gen_fig <- ggplot(genus_no, aes(x = ppDLCO_baseline, y = genus_no)) +
   geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
   guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
          shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {ppDLCO_richness_rho}<br>
+  labs(subtitle = glue("Spearman's rho = {corr_results['ppDLCO_baseline_richness', 'rho']}<br>
                        *p* = {signif(corr_results['ppDLCO_baseline_richness', 'padj'], 3)}"),
        x = "Baseline DL<sub>CO</sub> (% predicted)",
        y = "No. of unique genera",
@@ -832,75 +782,25 @@ dlco_gen_fig <- ggplot(genus_no, aes(x = ppDLCO_baseline, y = genus_no)) +
         axis.title.x = element_markdown())
 ```
 
-## Shannon index
+Genus richness against ppFVC
 
 ```{r}
-shannon <- mutate(shannon, survival_months = floor(survival_days / 30.4375))
-
-for (cv in clinical_vars) {
-  cor_df <- cor_test(data = shannon, shannon, cv, method = "spearman")
-  pval <- cor_df$p
-  rho <- cor_df$cor
-  corr_results[str_c(cv, "shannon", sep = "_"), "p"] <- pval
-  if (pval < 0.05) {
-    print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
-  }
-}
-```
-
-Baseline ppFVC
-
-```{r}
-ppFVC_shannon_df <- cor_test(data = shannon, shannon, ppFVC_baseline, method = "spearman")
-ppFVC_shannon_pval <- ppFVC_shannon_df$p
-ppFVC_shannon_rho <- ppFVC_shannon_df$cor
-```
-
-```{r}
-fvc_shannon_fig <- ggplot(shannon, aes(x = ppFVC_baseline, y = shannon)) +
+fvc_gen_fig <- ggplot(genus_no, aes(x = ppFVC_baseline, y = genus_no)) +
   geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
   geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
   guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
          shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {ppFVC_shannon_rho}<br>
-                       *p* = {signif(ppFVC_shannon_pval, 3)}"),
+  labs(subtitle = glue("Spearman's rho = {corr_results['ppFVC_baseline_richness', 'rho']}<br>
+                       *p* = {signif(corr_results['ppFVC_baseline_richness', 'padj'], 3)}"),
        x = "Baseline FVC (% predicted)",
-       y = "Shannon index") +
+       y = "No. of unique genera",
+       tag = "D") +
   scale_colour_manual(values = muc5b_palette) +
   theme(plot.subtitle = element_markdown(),
         legend.title = element_markdown(face = "bold"))
 ```
 
-Baseline DLCO
-
-```{r}
-DLCO_shannon_df <- cor_test(data = shannon, shannon, DLCO_baseline, method = "spearman")
-DLCO_shannon_pval <- DLCO_shannon_df$p
-DLCO_shannon_rho <- DLCO_shannon_df$cor
-```
-
-```{r}
-ggplot(shannon, aes(x = DLCO_baseline, y = shannon)) +
-  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
-  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
-  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
-         shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {DLCO_shannon_rho}<br>
-                       *p* = {signif(DLCO_shannon_pval, 3)}"),
-       x = "Baseline DLCO",
-       y = "Shannon index") +
-  scale_colour_manual(values = muc5b_palette) +
-  theme(plot.subtitle = element_markdown(),
-        legend.title = element_markdown(face = "bold"))
-```
-
-Baseline ppDLCO
-
-```{r}
-ppDLCO_shannon_df <- cor_test(data = shannon, shannon, ppDLCO_baseline, method = "spearman")
-ppDLCO_shannon_pval <- ppDLCO_shannon_df$p
-ppDLCO_shannon_rho <- ppDLCO_shannon_df$cor
-```
+Shannon index against ppDLCO
 
 ```{r}
 dlco_shannon_fig <- ggplot(shannon, aes(x = ppDLCO_baseline, y = shannon)) +
@@ -908,7 +808,7 @@ dlco_shannon_fig <- ggplot(shannon, aes(x = ppDLCO_baseline, y = shannon)) +
   geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
   guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
          shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {ppDLCO_shannon_rho}<br>
+  labs(subtitle = glue("Spearman's rho = {corr_results['ppDLCO_baseline_shannon', 'rho']}<br>
                        *p* = {signif(corr_results['ppDLCO_baseline_shannon', 'padj'], 3)}"),
        x = "Baseline DL<sub>CO</sub> (% predicted)",
        y = "Shannon index",
@@ -920,11 +820,6 @@ dlco_shannon_fig <- ggplot(shannon, aes(x = ppDLCO_baseline, y = shannon)) +
 ```
 
 ```{r}
-corr_results$padj <- p.adjust(corr_results$p, method = "BH")
-corr_results$is_signif <- corr_results$padj < 0.05
-```
-
-```{r}
 fig <- (dlco_gen_fig | dlco_shannon_fig | dlco_chao_fig) /
   (plot_spacer() | fvc_gen_fig | fvc_chao_fig | plot_spacer()) +
   plot_layout(guides = "collect", widths = c(1, 1, 1))
@@ -932,38 +827,4 @@ fig <- (dlco_gen_fig | dlco_shannon_fig | dlco_chao_fig) /
 svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/clin_feat.svg", width = 18, height = 10)
 print(fig)
 dev.off()
-```
-
-## Inverse Simpson index
-
-```{r}
-inv_simpson <- mutate(inv_simpson, survival_months = floor(survival_days / 30.4375))
-
-for (cv in clinical_vars) {
-  cor_df <- cor_test(data = inv_simpson, inv_simpson, cv, method = "spearman")
-  pval <- cor_df$p
-  rho <- cor_df$cor
-  if (pval < 0.05) {
-    print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
-  }
-}
-```
-
-```{r}
-ppDLCO_invsimp_df <- cor_test(data = inv_simpson, inv_simpson, ppDLCO_baseline, method = "spearman")
-ppDLCO_invsimp_pval <- ppDLCO_invsimp_df$p
-ppDLCO_invsimp_rho <- ppDLCO_invsimp_df$cor
-
-ggplot(inv_simpson, aes(x = ppDLCO_baseline, y = inv_simpson)) +
-  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
-  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
-  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))),
-         shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {ppDLCO_invsimp_rho}<br>
-                       *p* = {signif(ppDLCO_invsimp_pval, 3)}"),
-       x = "Baseline predicted percent DLCO",
-       y = "Inverse Simpson index") +
-  scale_colour_manual(values = muc5b_palette) +
-  theme(plot.subtitle = element_markdown(),
-        legend.title = element_markdown(hjust = 0.5, face = "bold"))
 ```

@@ -261,6 +261,18 @@ pcoa_nc + stat_ellipse(aes(group = sample_type, color = sample_type)) +
 
 Fewer true samples overlap with controls. We will remove contaminant taxa from subsequent analyses.
 
+Sequencing statistics
+
+```{r}
+# Original dataset
+physeq_nr
+summarize_phyloseq(physeq_nr)
+
+# After removing contaminant taxa
+physeq_nc
+summarize_phyloseq(physeq_nc)
+```
+
 ### Dissertation figure
 
 ```{r}
@@ -268,7 +280,7 @@ theme_set(theme_bw() + theme(text = element_text(family = "Arial"),
                              legend.title = element_text(face = "bold"),
                              plot.tag = element_text(face = "bold")))
 
-physeq_nr <- subset_samples(physeq_nr, diagnosis == "IPF" | is_ctrl) # only keep IPF and control samples
+physeq_nr <- subset_samples(physeq_nr, diagnosis == "IPF" | is_ctrl) # only keep IPF and control samples for visualisation
 sample_data(physeq_nr)$study <- factor(sample_data(physeq_nr)$study,
                                        levels = c("BRU", "PROFILE", "PROFOUND", "Control"),
                                        labels = c("IPF (BRU)", "IPF (PROFILE)", "IPF (PROFOUND)", "Control"))
@@ -288,10 +300,13 @@ permanova <- adonis2(dist_matrix ~ is_ctrl, data = meta(physeq_nr))
 pval <- permanova$`Pr(>F)`[1]
 r2 <- permanova$R2[1]
 
-pcoa_bef <- plot_ordination(physeq_nr, ord_nr, color = "is_ctrl", shape = "study") +
-  stat_ellipse(aes(group = is_ctrl, color = is_ctrl), linetype = 2) +
+pcoa_bef <- plot_ordination(physeq_nr, ord_nr)
+pcoa_bef$layers <- pcoa_bef$layers[-1]  # removes the first layer (default points)
+pcoa_bef <- pcoa_bef + geom_point(aes(color = is_ctrl, shape = study), size = 0.8) + # smaller points
+  stat_ellipse(aes(group = is_ctrl, color = is_ctrl, fill = is_ctrl), linetype = 2, geom = "polygon", alpha = 0.15) +
   guides(shape = guide_legend(title = "Sample Type", override.aes = list(colour = c(rep("#D1495B", 3), "#00798C"))),
-         colour = "none") + 
+         colour = "none",
+         fill = "none") + 
   labs(subtitle = glue("PERMANOVA *p* = {signif(pval, 3)}<br>
                        *R*<sup>2</sup> = {signif(r2, 3)}"),
        x = glue("PCo1 ({signif(percent_expl_pco1, 3)}%)"),
@@ -299,6 +314,7 @@ pcoa_bef <- plot_ordination(physeq_nr, ord_nr, color = "is_ctrl", shape = "study
        tag = "A") +
   scale_colour_manual(values = c("#D1495B", "#00798C")) +
   scale_shape_manual(values = c(1, 2, 0, 4)) +
+  scale_fill_manual(values = c("#D1495B", "#00798C")) +
   theme(plot.subtitle = element_markdown(size = 10))
 ```
 
@@ -317,17 +333,21 @@ permanova_nc <- adonis2(dist_matrix_nc ~ is_ctrl, data = meta(physeq_nc))
 pval_nc <- permanova_nc$`Pr(>F)`[1]
 r2_nc <- permanova_nc$R2[1]
 
-pcoa_aft <- plot_ordination(physeq_nc, ord_nc, color = "is_ctrl", shape = "study") +
-  stat_ellipse(aes(group = is_ctrl, color = is_ctrl), linetype = 2) +
+pcoa_aft <- plot_ordination(physeq_nc, ord_nc)
+pcoa_aft$layers <- pcoa_aft$layers[-1]
+pcoa_aft <- pcoa_aft + geom_point(aes(color = is_ctrl, shape = study), size = 0.8) +
+  stat_ellipse(aes(group = is_ctrl, color = is_ctrl, fill = is_ctrl), linetype = 2, geom = "polygon", alpha = 0.15) +
   guides(shape = guide_legend(title = "Sample Type", override.aes = list(colour = c(rep("#D1495B", 3), "#00798C"))),
-         colour = "none") + 
+         colour = "none",
+         fill = "none") + 
   labs(subtitle = glue("PERMANOVA *p* = {signif(pval_nc, 3)}<br>
                        *R*<sup>2</sup> = {signif(r2_nc, 3)}"),
        x = glue("PCo1 ({signif(percent_expl_pco1_nc, 3)}%)"),
-       y = glue("PCo2 ({signif(percent_expl_pco2_nc, 3)}%)"),
+       y = glue("PCo2 ({format(signif(percent_expl_pco2_nc, 3), nsmall = 1)}%)"),
        tag = "B") +
   scale_colour_manual(values = c("#D1495B", "#00798C")) +
   scale_shape_manual(values = c(1, 2, 0, 4)) +
+  scale_fill_manual(values = c("#D1495B", "#00798C")) +
   theme(plot.subtitle = element_markdown(size = 10))
 ```
 
@@ -368,13 +388,13 @@ chao_fig <- ggplot(alpha_div_chao, aes(x = MUC5B, y = value)) +
 Correlations with clinical variables
 
 ```{r}
-clinical_vars <- c("FVC_baseline", "ppFVC_baseline", "DLCO_baseline", "ppDLCO_baseline", "FVC_change_1y", "survival_months")
 alpha_div_chao <- mutate(alpha_div_chao, survival_months = floor(survival_days / 30.4375))
 for (cv in clinical_vars) {
   cor_df <- cor_test(data = alpha_div_chao, value, cv, method = "spearman")
   pval <- cor_df$p
   rho <- cor_df$cor
   corr_results[str_c(cv, "chao1", sep = "_"), "p"] <- pval
+  corr_results[str_c(cv, "chao1", sep = "_"), "rho"] <- rho
   if (pval < 0.05) {
     print(glue("Spearman's rho for {cv}: {rho}\np-value: {pval}"))
   }
@@ -382,52 +402,11 @@ for (cv in clinical_vars) {
 ```
 
 ```{r}
-ppFVC_chao_df <- cor_test(data = alpha_div_chao, value, ppFVC_baseline, method = "spearman")
-ppFVC_chao_pval <- ppFVC_chao_df$p
-ppFVC_chao_rho <- ppFVC_chao_df$cor
-
-fvc_chao_fig <- ggplot(alpha_div_chao, aes(x = ppFVC_baseline, y = value)) +
-  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
-  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
-  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))), shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {ppFVC_chao_rho}<br>
-                       *p* = {signif(corr_results['ppFVC_baseline_chao1', 'padj'], 3)}"),
-       x = "Baseline FVC (% predicted)",
-       y = "Chao1 index",
-       tag = "E") +
-  scale_colour_manual(values = muc5b_palette) +
-  theme(plot.subtitle = element_markdown(),
-        legend.title = element_markdown(face = "bold"))
-```
-
-```{r}
-DLCO_chao_df <- cor_test(data = alpha_div_chao, value, DLCO_baseline, method = "spearman")
-DLCO_chao_pval <- DLCO_chao_df$p
-DLCO_chao_rho <- DLCO_chao_df$cor
-
-ggplot(alpha_div_chao, aes(x = DLCO_baseline, y = value)) +
-  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
-  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
-  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))), shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {DLCO_chao_rho}<br>
-                       *p* = {signif(DLCO_chao_pval, 3)}"),
-       x = "Baseline DLCO",
-       y = "Chao1 index") +
-  scale_colour_manual(values = muc5b_palette) +
-  theme(plot.subtitle = element_markdown(),
-        legend.title = element_markdown(hjust = 0.5, face = "bold"))
-```
-
-```{r}
-ppDLCO_chao_df <- cor_test(data = alpha_div_chao, value, ppDLCO_baseline, method = "spearman")
-ppDLCO_chao_pval <- ppDLCO_chao_df$p
-ppDLCO_chao_rho <- ppDLCO_chao_df$cor
-
 dlco_chao_fig <- ggplot(alpha_div_chao, aes(x = ppDLCO_baseline, y = value)) +
   geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
   geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
   guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))), shape = "none") + 
-  labs(subtitle = glue("Spearman's rho = {ppDLCO_chao_rho}<br>
+  labs(subtitle = glue("Spearman's rho = {corr_results['ppDLCO_baseline_chao1', 'rho']}<br>
                        *p* < 0.0001"),
        x = "Baseline DL<sub>CO</sub> (% predicted)",
        y = "Chao1 index",
@@ -438,10 +417,26 @@ dlco_chao_fig <- ggplot(alpha_div_chao, aes(x = ppDLCO_baseline, y = value)) +
         axis.title.x = element_markdown())
 ```
 
+```{r}
+fvc_chao_fig <- ggplot(alpha_div_chao, aes(x = ppFVC_baseline, y = value)) +
+  geom_point(aes(colour = MUC5B, shape = MUC5B), size = 1.2) + 
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linewidth = 0.7) +
+  guides(colour = guide_legend(title = "*MUC5B* Genotype", override.aes = list(shape = c(16, 17, 15))), shape = "none") + 
+  labs(subtitle = glue("Spearman's rho = {corr_results['ppFVC_baseline_chao1', 'rho']}<br>
+                       *p* = {signif(corr_results['ppFVC_baseline_chao1', 'padj'], 3)}"),
+       x = "Baseline FVC (% predicted)",
+       y = "Chao1 index",
+       tag = "E") +
+  scale_colour_manual(values = muc5b_palette) +
+  theme(plot.subtitle = element_markdown(),
+        legend.title = element_markdown(face = "bold"))
+```
+
 ## Remove unidentified taxa
 
 ```{r}
 physeq_id <- subset_taxa(physeq_nc, !is.na(Phylum))
+physeq_id
 summarize_phyloseq(physeq_id)
 ```
 

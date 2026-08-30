@@ -58,16 +58,18 @@ colnames(pcoa_coord) <- c("PCo1", "PCo2")
 dissimilarity <- cbind(meta_muc5b, pcoa_coord)
 
 pcoa_bef <- ggplot(data = dissimilarity, aes(x = PCo1, y = PCo2, colour = study, shape = study)) + 
-  geom_point(size = 1) + stat_ellipse(linetype = 2) +
+  geom_point(size = 1) + stat_ellipse(aes(fill = study), linetype = 2, geom = "polygon", alpha = 0.1) +
   guides(shape = guide_legend(title = "Cohort", override.aes = list(colour = c("#0E7175", "#FD7901", "#C35BCA"))),
-         colour = "none") +
+         colour = "none",
+         fill = "none") +
   labs(subtitle = glue("PERMANOVA *p* = {signif(pval, 3)}<br>
                        *R*<sup>2</sup> = {signif(r2, 3)}"),
        x = glue("PCo1 ({signif(percent_expl_pco1, 3)}%)"),
        y = glue("PCo2 ({signif(percent_expl_pco2, 3)}%)"),
        tag = "A") +
   scale_colour_manual(values = c("#0E7175", "#FD7901", "#C35BCA")) +
-  scale_shape_manual(values = c(1, 2, 0))
+  scale_shape_manual(values = c(1, 2, 0)) +
+  scale_fill_manual(values = c("#0E7175", "#FD7901", "#C35BCA"))
 ```
 
 # Format input files for MMUPHin
@@ -123,16 +125,18 @@ colnames(pcoa_coord_adj) <- c("PCo1", "PCo2")
 dissimilarity_adj <- cbind(meta_muc5b, pcoa_coord_adj)
 
 pcoa_aft <- ggplot(data = dissimilarity_adj, aes(x = PCo1, y = PCo2, colour = study, shape = study)) + 
-  geom_point(size = 1) + stat_ellipse(linetype = 2) +
+  geom_point(size = 1) + stat_ellipse(aes(fill = study), linetype = 2, geom = "polygon", alpha = 0.1) +
   guides(shape = guide_legend(title = "Cohort", override.aes = list(colour = c("#0E7175", "#FD7901", "#C35BCA"))),
-         colour = "none") +
+         colour = "none",
+         fill = "none") +
   labs(subtitle = glue("PERMANOVA *p* = {signif(pval_adj, 3)}<br>
                        *R*<sup>2</sup> = {signif(r2_adj, 3)}"),
        x = glue("PCo1 ({signif(percent_expl_pco1_adj, 3)}%)"),
        y = glue("PCo2 ({signif(percent_expl_pco2_adj, 3)}%)"),
        tag = "B") +
   scale_colour_manual(values = c("#0E7175", "#FD7901", "#C35BCA")) +
-  scale_shape_manual(values = c(1, 2, 0))
+  scale_shape_manual(values = c(1, 2, 0)) +
+  scale_fill_manual(values = c("#0E7175", "#FD7901", "#C35BCA"))
 
 fig <- pcoa_bef + pcoa_aft + plot_layout(guides = "collect")
 svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/batch_adjust.svg", width = 12, height = 5)
