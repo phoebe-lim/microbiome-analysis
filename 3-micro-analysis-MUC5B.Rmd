@@ -505,8 +505,8 @@ Maaslin2(abund_family, meta_muc5b, output = "MaAsLin2 Output/Family",
 # Survival analysis
 
 ```{r}
-meta_muc5b <- mutate(meta_muc5b, survival_months = floor(survival_days / 30.4375))
-meta_muc5b <- mutate(meta_muc5b, death = if_else(death == "Yes", 1, 0))
+meta_muc5b <- mutate(meta_muc5b, survival_months = floor(survival_days / 30.4375),
+                     death = if_else(death == "Yes", 1, 0))
 ```
 
 ## Fit survival data using Kaplan-Meier method
@@ -558,8 +558,16 @@ No significant difference in survival between groups but T/T group has a gentler
 ## Fit Cox proportional hazards model
 
 ```{r}
-coxph_muc5b <- coxph(surv_object ~ MUC5B + study, data = meta_muc5b)
-ggforest(coxph_muc5b, data = as.data.frame(meta_muc5b))
+meta_muc5b <- mutate(meta_muc5b, smoking_history = replace_when(smoking_history,
+                                                                smoking_history == "Ex" | smoking_history == "Current" ~ "Ever"))
+meta_muc5b$smoking_history <- factor(meta_muc5b$smoking_history, levels = c("Never", "Ever"))
+coxph_muc5b <- coxph(surv_object ~ MUC5B + age + sex + smoking_history + ppFVC_baseline + ppDLCO_baseline,
+                     data = meta_muc5b)
+cox_fig <- ggforest(coxph_muc5b, data = as.data.frame(meta_muc5b), main = "Hazard Ratio")
+
+svg("~/OneDrive - Imperial College London/MSc Genomic Medicine/Research Project/Dissertation/Figures/cox_forest.svg", width = 8, height = 5)
+print(cox_fig)
+dev.off()
 ```
 
 # Clustered heatmap
